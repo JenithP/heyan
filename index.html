@@ -304,7 +304,17 @@ import {
   getAuth, onAuthStateChanged, createUserWithEmailAndPassword,
   signInWithEmailAndPassword, sendPasswordResetEmail, signOut, updateProfile
 } from "https://www.gstatic.com/firebasejs/11.0.0/firebase-auth.js";
-import { firebaseConfig } from "./firebase-config.js";
+
+// Firebase 웹 설정 — apiKey 등은 공개 식별자이며 비밀이 아닙니다.
+// 실제 보안은 firestore.rules + Firebase Auth 가 담당합니다.
+const firebaseConfig = {
+  apiKey: "AIzaSyAdLOyDaRPdfQGhjiulsB57dXkwxXozFyI",
+  authDomain: "heyan-f63df.firebaseapp.com",
+  projectId: "heyan-f63df",
+  storageBucket: "heyan-f63df.firebasestorage.app",
+  messagingSenderId: "488833333270",
+  appId: "1:488833333270:web:7382797a46dbb587091d37"
+};
 
 const fb = initializeApp(firebaseConfig);
 const db = getFirestore(fb);
