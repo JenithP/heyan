@@ -1,0 +1,6 @@
+heyan-f63df-firebase-adminsdk-fbsvc-e4486c66bb.json
+*-firebase-adminsdk-*.json
+firebase-config.js
+node_modules/
+.firebase/
+.firebaserc.local

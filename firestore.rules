@@ -1,0 +1,100 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function isActiveUser(phone) {
+      return phone is string
+        && exists(/databases/$(database)/documents/users/$(phone))
+        && get(/databases/$(database)/documents/users/$(phone)).data.type in ['member', 'manager', 'admin'];
+    }
+
+    function validRoom(roomId) {
+      return roomId in [
+        '4seat_1', '4seat_2', '4seat_3', '4seat_4', '4seat_5', '4seat_6', '4seat_7',
+        '6seat_1', '6seat_2', '6seat_3',
+        'meeting', 'room'
+      ];
+    }
+
+    function validSlot(slot) {
+      return slot in ['s1', 's2', 's3', 's4', 's5'];
+    }
+
+    function validStatus(status) {
+      return status in ['pending', 'approved', 'cancelled'];
+    }
+
+    function validUserCreate(userId) {
+      return request.resource.data.keys().hasOnly(['phone', 'pw', 'name', 'section', 'role', 'type', 'createdAt'])
+        && request.resource.data.phone == userId
+        && request.resource.data.name is string
+        && request.resource.data.pw is string
+        && request.resource.data.type in ['member', 'manager', 'admin']
+        && (
+          request.resource.data.type == 'member'
+          || userId in ['administrator', 'manager']
+        );
+    }
+
+    function validUserSoftDelete(userId) {
+      return resource.data.phone == userId
+        && request.resource.data.phone == userId
+        && request.resource.data.type == 'deleted'
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['type', 'deletedAt', 'deletedBy']);
+    }
+
+    function validBookingCreate() {
+      return request.resource.data.keys().hasOnly([
+          'date', 'roomId', 'slot', 'userPhone', 'userName',
+          'status', 'isManager', 'createdAt'
+        ])
+        && request.resource.data.date is string
+        && validRoom(request.resource.data.roomId)
+        && validSlot(request.resource.data.slot)
+        && isActiveUser(request.resource.data.userPhone)
+        && request.resource.data.userName is string
+        && (
+          (request.resource.data.status == 'pending' && request.resource.data.isManager == false)
+          || (request.resource.data.status == 'approved' && request.resource.data.isManager == true)
+        );
+    }
+
+    function validBookingUpdate() {
+      return request.resource.data.keys().hasOnly([
+          'date', 'roomId', 'slot', 'userPhone', 'userName',
+          'status', 'isManager', 'createdAt',
+          'approvedAt', 'approvedBy', 'cancelledAt', 'cancelledBy', 'cancelReason',
+          'price'
+        ])
+        && request.resource.data.date == resource.data.date
+        && request.resource.data.roomId == resource.data.roomId
+        && request.resource.data.slot == resource.data.slot
+        && request.resource.data.userPhone == resource.data.userPhone
+        && request.resource.data.userName == resource.data.userName
+        && request.resource.data.isManager == resource.data.isManager
+        && request.resource.data.createdAt == resource.data.createdAt
+        && validStatus(request.resource.data.status)
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+          'status', 'approvedAt', 'approvedBy', 'cancelledAt', 'cancelledBy', 'cancelReason'
+        ]);
+    }
+
+    match /users/{userId} {
+      allow get, list: if true;
+      allow create: if validUserCreate(userId);
+      allow update: if validUserSoftDelete(userId);
+      allow delete: if false;
+    }
+
+    match /bookings/{bookingId} {
+      allow read: if true;
+      allow create: if validBookingCreate();
+      allow update: if validBookingUpdate();
+      allow delete: if false;
+    }
+
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
