@@ -233,9 +233,10 @@
   <div class="modal">
     <h2>로그인</h2>
     <p class="modal-sub">Heyan 멤버십 계정으로 로그인하세요</p>
-    <div class="form-group"><label>아이디 (전화번호)</label><input type="text" id="login-id" placeholder="전화번호 또는 관리자 ID" oninput="clearErr('login-error')"></div>
+    <div class="form-group"><label>이메일</label><input type="email" id="login-email" placeholder="이메일 입력" oninput="clearErr('login-error')"></div>
     <div class="form-group"><label>비밀번호</label><input type="password" id="login-pw" placeholder="비밀번호 입력" onkeydown="if(event.key==='Enter')doLogin()"></div>
     <div id="login-error" style="color:#e08080;font-size:12px;margin-bottom:12px;display:none"></div>
+    <button class="btn btn-secondary" style="width:100%;margin-bottom:10px;flex:none" onclick="resetPassword()">비밀번호 재설정 메일 받기</button>
     <div class="modal-btns">
       <button class="btn btn-secondary" onclick="closeModal('login-modal')">취소</button>
       <button class="btn btn-primary" id="login-btn" onclick="doLogin()">로그인</button>
@@ -248,8 +249,9 @@
   <div class="modal">
     <h2>멤버십 가입</h2>
     <p class="modal-sub">Heyan 문화센터 멤버십에 가입하세요</p>
+    <div class="form-group"><label>이메일 *</label><input type="email" id="reg-email" placeholder="이메일 입력"></div>
     <div class="form-group"><label>이름 *</label><input type="text" id="reg-name" placeholder="이름 입력"></div>
-    <div class="form-group"><label>전화번호 * (아이디로 사용됩니다)</label><input type="tel" id="reg-phone" placeholder="010-0000-0000"></div>
+    <div class="form-group"><label>전화번호 *</label><input type="tel" id="reg-phone" placeholder="010-0000-0000"></div>
     <div class="form-group"><label>비밀번호 *</label><input type="password" id="reg-pw" placeholder="비밀번호 입력"></div>
     <div class="form-group"><label>소속 부 / 구역</label><input type="text" id="reg-section" placeholder="예) 3부 2구역"></div>
     <div class="form-group"><label>직책</label><input type="text" id="reg-role" placeholder="예) 구역장, 일반회원 등"></div>
@@ -298,7 +300,10 @@
 import { initializeApp } from "https://www.gstatic.com/firebasejs/11.0.0/firebase-app.js";
 import { getFirestore, collection, doc, getDoc, getDocs, setDoc, updateDoc, query, where }
   from "https://www.gstatic.com/firebasejs/11.0.0/firebase-firestore.js";
-import { getAuth, signInAnonymously } from "https://www.gstatic.com/firebasejs/11.0.0/firebase-auth.js";
+import {
+  getAuth, onAuthStateChanged, createUserWithEmailAndPassword,
+  signInWithEmailAndPassword, sendPasswordResetEmail, signOut, updateProfile
+} from "https://www.gstatic.com/firebasejs/11.0.0/firebase-auth.js";
 import { firebaseConfig } from "./firebase-config.js";
 
 const fb = initializeApp(firebaseConfig);
@@ -324,52 +329,25 @@ const SLOTS = [
   {key:'s1',label:'10:00–12:00'},{key:'s2',label:'12:00–14:00'},
   {key:'s3',label:'14:00–16:00'},{key:'s4',label:'16:00–18:00'},{key:'s5',label:'18:00–20:00'},
 ];
+const PRIMARY_ADMIN_EMAIL = 'leily.yoon@gmail.com';
 const ADMIN_REPORT_EMAIL = '';
 const ADMIN_REPORT_SUBJECT_PREFIX = 'Heyan 예약 보고서';
 
 // ── 상태 ──
 let CU = null; // currentUser
-try { CU = JSON.parse(sessionStorage.getItem('heyan_u')); } catch {}
+let authUser = null;
 let pendingBk = null;
 let detailId = null;
 let adminTab = 'today';
 let adminReportItems = [];
+let authProfileWriteInProgress = false;
 
 // ── 초기화 ──
 async function init() {
   const dp = document.getElementById('date-picker');
   const today = new Date().toISOString().split('T')[0];
   dp.value = today; dp.min = today;
-  if(CU) await ensureFirebaseSession();
-
-  // 관리자 계정 시드
-  const adminSnap = await getDoc(doc(db,'users','administrator'));
-  if (!adminSnap.exists()) {
-    await setDoc(doc(db,'users','administrator'),{phone:'administrator',pw:'power1440!1',name:'관리자',section:'',role:'관리자',type:'admin'});
-    await setDoc(doc(db,'users','manager'),{phone:'manager',pw:'power1440!1',name:'총무',section:'',role:'총무',type:'manager'});
-  }
-
-  // 만료 예약 자동 취소
-  if(isAdminUser()){
-    const todayStr = today;
-    const pq = query(collection(db,'bookings'),where('status','==','pending'));
-    const psnap = await getDocs(pq);
-    const ups = [];
-    psnap.forEach(d=>{ if(d.data().date < todayStr) ups.push(updateDoc(doc(db,'bookings',d.id),{status:'cancelled',cancelReason:'승인 지연 자동 취소'})); });
-    await Promise.all(ups);
-  }
-
-  if (CU) {
-    document.getElementById('nav-guest').style.display = 'none';
-    document.getElementById('user-info').style.display = 'flex';
-    document.getElementById('display-name').textContent = CU.name;
-    document.getElementById('panel-switcher').style.display = 'block';
-    if (isAdminUser()) {
-      document.getElementById('admin-btn').style.display = 'inline-block';
-      document.getElementById('admin-tab-btn').style.display = 'inline-block';
-    }
-  }
-  await renderGrid();
+  onAuthStateChanged(auth, handleAuthChange);
 }
 window.addEventListener('DOMContentLoaded', init);
 
@@ -387,15 +365,86 @@ function toast(msg,type=''){
   _toastT=setTimeout(()=>{t.className='';},3200);
 }
 function showErr(id,msg){const el=document.getElementById(id);el.textContent=msg;el.style.display='block';}
+function normalizeEmail(email){return String(email||'').trim().toLowerCase();}
+function isPrimaryAdminEmail(email){return normalizeEmail(email)===PRIMARY_ADMIN_EMAIL;}
 function isAdminUser(){return CU&&(CU.type==='admin'||CU.type==='manager');}
-async function ensureFirebaseSession(){
-  if(auth.currentUser) return true;
+function isCurrentBookingOwner(bk){
+  return !!(CU&&(
+    bk.userId===CU.uid ||
+    normalizeEmail(bk.userEmail)===normalizeEmail(CU.email) ||
+    (bk.userPhone&&CU.phone&&bk.userPhone===CU.phone)
+  ));
+}
+async function loadUserProfile(user){
+  const email=normalizeEmail(user.email);
+  const ref=doc(db,'users',user.uid);
+  const snap=await getDoc(ref);
+  if(snap.exists()) return {id:snap.id,...snap.data()};
+  if(isPrimaryAdminEmail(email)){
+    const profile={
+      uid:user.uid,email,name:user.displayName||'관리자',phone:'',
+      section:'',role:'관리자',type:'admin',createdAt:new Date().toISOString()
+    };
+    await setDoc(ref,profile);
+    return {id:user.uid,...profile};
+  }
+  return null;
+}
+function resetSignedOutUI(){
+  CU=null; authUser=null;
+  document.getElementById('nav-guest').style.display='flex';
+  document.getElementById('user-info').style.display='none';
+  document.getElementById('panel-switcher').style.display='none';
+  document.getElementById('admin-btn').style.display='none';
+  document.getElementById('admin-tab-btn').style.display='none';
+  switchPanelView('reservation');
+}
+function applySignedInUI(){
+  document.getElementById('nav-guest').style.display='none';
+  document.getElementById('user-info').style.display='flex';
+  document.getElementById('display-name').textContent=CU.name||CU.email;
+  document.getElementById('panel-switcher').style.display='block';
+  document.getElementById('admin-btn').style.display=isAdminUser()?'inline-block':'none';
+  document.getElementById('admin-tab-btn').style.display=isAdminUser()?'inline-block':'none';
+}
+function switchPanelView(name){
+  ['reservation','my','admin'].forEach(p=>document.getElementById(p+'-panel').style.display=p===name?'block':'none');
+  document.querySelectorAll('.panel-tab').forEach(t=>t.classList.remove('active'));
+  document.querySelectorAll('.panel-tab')[['reservation','my','admin'].indexOf(name)]?.classList.add('active');
+}
+async function cancelExpiredBookings(){
+  if(!isAdminUser()) return;
+  const todayStr = new Date().toISOString().split('T')[0];
+  const pq = query(collection(db,'bookings'),where('status','==','pending'));
+  const psnap = await getDocs(pq);
+  const ups = [];
+  psnap.forEach(d=>{ if(d.data().date < todayStr) ups.push(updateDoc(doc(db,'bookings',d.id),{status:'cancelled',cancelReason:'승인 지연 자동 취소'})); });
+  await Promise.all(ups);
+}
+async function handleAuthChange(user){
+  if(authProfileWriteInProgress) return;
+  if(!user){
+    resetSignedOutUI();
+    await renderGrid();
+    return;
+  }
+  authUser=user;
   try{
-    await signInAnonymously(auth);
-    return true;
+    const profile=await loadUserProfile(user);
+    if(!profile||profile.type==='deleted'){
+      await signOut(auth);
+      resetSignedOutUI();
+      toast('회원 정보가 없습니다. 이메일로 다시 가입해 주세요.','error');
+      await renderGrid();
+      return;
+    }
+    CU=profile;
+    applySignedInUI();
+    await cancelExpiredBookings();
+    await renderGrid();
   }catch(e){
-    console.warn('Firebase anonymous session is not available.',e);
-    return false;
+    console.error(e);
+    toast('회원 정보를 불러오지 못했습니다.','error');
   }
 }
 function getRoomName(roomId){return ROOMS.find(r=>r.id===roomId)?.name||roomId||'-';}
@@ -426,48 +475,65 @@ async function copyToClipboard(text){
 
 // ── LOGIN ──
 window.doLogin = async()=>{
-  const id=document.getElementById('login-id').value.trim();
+  const email=normalizeEmail(document.getElementById('login-email').value);
   const pw=document.getElementById('login-pw').value;
   const btn=document.getElementById('login-btn');
   btn.textContent='확인 중...'; btn.disabled=true;
   try {
-    const snap=await getDoc(doc(db,'users',id));
-    if(!snap.exists()||snap.data().pw!==pw){showErr('login-error','아이디 또는 비밀번호가 올바르지 않습니다.');return;}
-    if(snap.data().type==='deleted'){showErr('login-error','삭제된 계정입니다.');return;}
-    CU=snap.data();
-    await ensureFirebaseSession();
-    sessionStorage.setItem('heyan_u',JSON.stringify(CU));
+    if(!email||!pw){showErr('login-error','이메일과 비밀번호를 입력해 주세요.');return;}
+    await signInWithEmailAndPassword(auth,email,pw);
     closeModal('login-modal');
-    document.getElementById('login-id').value='';
+    document.getElementById('login-email').value='';
     document.getElementById('login-pw').value='';
-    location.reload();
-  } catch(e){showErr('login-error','오류가 발생했습니다.');}
+  } catch(e){showErr('login-error','이메일 또는 비밀번호가 올바르지 않습니다.');}
   finally{btn.textContent='로그인';btn.disabled=false;}
+};
+
+window.resetPassword=async()=>{
+  const email=normalizeEmail(document.getElementById('login-email').value);
+  if(!email){showErr('login-error','비밀번호 재설정 메일을 받을 이메일을 입력해 주세요.');return;}
+  try{
+    await sendPasswordResetEmail(auth,email);
+    toast('비밀번호 재설정 메일을 보냈습니다.','success');
+  }catch(e){
+    showErr('login-error','재설정 메일을 보낼 수 없습니다. 이메일을 확인해 주세요.');
+  }
 };
 
 // ── REGISTER ──
 window.doRegister = async()=>{
+  const email=normalizeEmail(document.getElementById('reg-email').value);
   const name=document.getElementById('reg-name').value.trim();
   const phone=document.getElementById('reg-phone').value.trim();
   const pw=document.getElementById('reg-pw').value;
   const section=document.getElementById('reg-section').value.trim();
   const role=document.getElementById('reg-role').value.trim();
-  if(!name||!phone||!pw){showErr('reg-error','이름, 전화번호, 비밀번호는 필수입니다.');return;}
+  if(!email||!name||!phone||!pw){showErr('reg-error','이메일, 이름, 전화번호, 비밀번호는 필수입니다.');return;}
+  if(pw.length<6){showErr('reg-error','비밀번호는 6자 이상이어야 합니다.');return;}
   const btn=document.getElementById('reg-btn');
   btn.textContent='처리 중...'; btn.disabled=true;
   try {
-    const ex=await getDoc(doc(db,'users',phone));
-    if(ex.exists()&&ex.data().type!=='deleted'){showErr('reg-error','이미 등록된 전화번호입니다.');return;}
-    await setDoc(doc(db,'users',phone),{phone,pw,name,section,role,type:'member',createdAt:new Date().toISOString()});
+    authProfileWriteInProgress=true;
+    const cred=await createUserWithEmailAndPassword(auth,email,pw);
+    await updateProfile(cred.user,{displayName:name});
+    const type=isPrimaryAdminEmail(email)?'admin':'member';
+    const profile={uid:cred.user.uid,email,phone,name,section,role:type==='admin'?'관리자':role,type,createdAt:new Date().toISOString()};
+    await setDoc(doc(db,'users',cred.user.uid),profile);
+    authProfileWriteInProgress=false;
+    await handleAuthChange(cred.user);
     closeModal('register-modal');
-    ['reg-name','reg-phone','reg-pw','reg-section','reg-role'].forEach(i=>document.getElementById(i).value='');
-    toast('가입이 완료되었습니다! 로그인해 주세요.','success');
-  } catch(e){showErr('reg-error','오류가 발생했습니다.');}
+    ['reg-email','reg-name','reg-phone','reg-pw','reg-section','reg-role'].forEach(i=>document.getElementById(i).value='');
+    toast(type==='admin'?'관리자 계정으로 가입되었습니다.':'가입이 완료되었습니다.','success');
+  } catch(e){
+    authProfileWriteInProgress=false;
+    const msg=e.code==='auth/email-already-in-use'?'이미 가입된 이메일입니다. 로그인해 주세요.':'가입 중 오류가 발생했습니다.';
+    showErr('reg-error',msg);
+  }
   finally{btn.textContent='가입하기';btn.disabled=false;}
 };
 
 // ── LOGOUT ──
-window.logout=()=>{sessionStorage.removeItem('heyan_u');location.reload();};
+window.logout=async()=>{await signOut(auth);toast('로그아웃되었습니다.','success');};
 
 // ── RENDER GRID ──
 window.renderGrid = async()=>{
@@ -477,7 +543,6 @@ window.renderGrid = async()=>{
 
   const bkMap={};
   if(CU){
-    await ensureFirebaseSession();
     const q=query(collection(db,'bookings'),where('date','==',date),where('status','in',['pending','approved']));
     const snap=await getDocs(q);
     snap.forEach(d=>{const b=d.data();bkMap[b.roomId+'_'+b.slot]={...b,id:d.id};});
@@ -501,10 +566,10 @@ window.renderGrid = async()=>{
       if(bk){
         if(bk.status==='approved'){
           if(bk.isManager){cc='bojanghoe';ct='부녀회 사용';}
-          else if(CU&&bk.userPhone===CU.phone){cc='my-booking';ct='내 예약 ✓';}
+          else if(isCurrentBookingOwner(bk)){cc='my-booking';ct='내 예약 ✓';}
           else{cc='unavailable';ct='예약 불가';}
         } else if(bk.status==='pending'){
-          if(CU&&bk.userPhone===CU.phone){cc='my-booking';ct='승인 대기';}
+          if(isCurrentBookingOwner(bk)){cc='my-booking';ct='승인 대기';}
           else{cc='pending';ct='예약 불가';}
         }
       }
@@ -523,22 +588,24 @@ window.renderGrid = async()=>{
 // ── CELL CLICK ──
 async function handleCell(roomId,slot,date){
   if(!CU){openModal('login-modal');return;}
-  await ensureFirebaseSession();
   const room=ROOMS.find(r=>r.id===roomId);
   const slotObj=SLOTS.find(s=>s.key===slot);
 
   // 내 예약 확인
-  const q=query(collection(db,'bookings'),where('date','==',date),where('roomId','==',roomId),where('slot','==',slot),where('userPhone','==',CU.phone));
+  const q=query(collection(db,'bookings'),where('date','==',date),where('roomId','==',roomId),where('slot','==',slot));
   const snap=await getDocs(q);
   if(!snap.empty){
-    const d=snap.docs.find(d=>['pending','approved'].includes(d.data().status));
+    const d=snap.docs.find(d=>['pending','approved'].includes(d.data().status)&&isCurrentBookingOwner(d.data()));
     if(d){openDetailModal({id:d.id,...d.data()});return;}
   }
 
   if(CU.type==='manager'){
     pendingBk={roomId,slot,date};
     const id='bk_'+Date.now();
-    await setDoc(doc(db,'bookings',id),{date,roomId,slot,userPhone:CU.phone,userName:CU.name,status:'approved',isManager:true,createdAt:new Date().toISOString()});
+    await setDoc(doc(db,'bookings',id),{
+      date,roomId,slot,userId:CU.uid,userEmail:CU.email,userPhone:CU.phone,userName:CU.name,
+      status:'approved',isManager:true,createdAt:new Date().toISOString()
+    });
     pendingBk=null;
     await renderGrid();
     toast('부녀회 예약이 완료되었습니다.','success');
@@ -557,10 +624,9 @@ window.confirmBooking=async()=>{
   const btn=document.getElementById('bk-confirm-btn');
   btn.textContent='신청 중...';btn.disabled=true;
   try{
-    await ensureFirebaseSession();
     await setDoc(doc(db,'bookings','bk_'+Date.now()),{
       date:pendingBk.date,roomId:pendingBk.roomId,slot:pendingBk.slot,
-      userPhone:CU.phone,userName:CU.name,status:'pending',isManager:false,
+      userId:CU.uid,userEmail:CU.email,userPhone:CU.phone,userName:CU.name,status:'pending',isManager:false,
       createdAt:new Date().toISOString()
     });
     closeModal('booking-modal');pendingBk=null;
@@ -581,6 +647,7 @@ function openDetailModal(bk){
       <div><span style="color:var(--text-dim);display:inline-block;min-width:70px;">날짜</span>${bk.date}</div>
       <div><span style="color:var(--text-dim);display:inline-block;min-width:70px;">시간</span>${slotObj?.label||bk.slot}</div>
       <div><span style="color:var(--text-dim);display:inline-block;min-width:70px;">예약자</span>${escapeHtml(bk.userName||'-')}</div>
+      <div><span style="color:var(--text-dim);display:inline-block;min-width:70px;">이메일</span>${escapeHtml(bk.userEmail||'-')}</div>
       <div><span style="color:var(--text-dim);display:inline-block;min-width:70px;">연락처</span>${escapeHtml(bk.userPhone||'-')}</div>
       <div><span style="color:var(--text-dim);display:inline-block;min-width:70px;">신청시각</span>${formatDateTime(bk.createdAt)}</div>
       <div><span style="color:var(--text-dim);display:inline-block;min-width:70px;">상태</span><span class="status-badge ${badgeClass(bk.status)}">${statusText(bk.status)}</span></div>
@@ -592,8 +659,7 @@ function openDetailModal(bk){
 
 window.cancelMyBooking=async()=>{
   if(!detailId)return;
-  await ensureFirebaseSession();
-  await updateDoc(doc(db,'bookings',detailId),{status:'cancelled',cancelledAt:new Date().toISOString(),cancelledBy:CU.phone});
+  await updateDoc(doc(db,'bookings',detailId),{status:'cancelled',cancelledAt:new Date().toISOString(),cancelledBy:CU.uid,cancelledByEmail:CU.email});
   closeModal('detail-modal');
   await renderGrid();
   if(document.getElementById('my-panel').style.display!=='none')await renderMyBookings();
@@ -603,9 +669,7 @@ window.cancelMyBooking=async()=>{
 // ── PANEL SWITCH ──
 window.switchPanel=async(name)=>{
   if(name==='admin'&&!isAdminUser()){toast('관리자만 접근할 수 있습니다.','error');return;}
-  ['reservation','my','admin'].forEach(p=>document.getElementById(p+'-panel').style.display=p===name?'block':'none');
-  document.querySelectorAll('.panel-tab').forEach(t=>t.classList.remove('active'));
-  document.querySelectorAll('.panel-tab')[['reservation','my','admin'].indexOf(name)]?.classList.add('active');
+  switchPanelView(name);
   if(name==='my')await renderMyBookings();
   if(name==='admin'){adminTab='today';document.querySelectorAll('.admin-tab').forEach((t,i)=>{t.classList.toggle('active',i===0);});await renderAdminContent();}
 };
@@ -613,10 +677,9 @@ window.switchPanel=async(name)=>{
 // ── MY BOOKINGS ──
 async function renderMyBookings(){
   if(!CU)return;
-  await ensureFirebaseSession();
   const el=document.getElementById('my-bookings-list');
   el.innerHTML='<div class="loading-overlay"><div class="spinner"></div> 불러오는 중...</div>';
-  const snap=await getDocs(query(collection(db,'bookings'),where('userPhone','==',CU.phone)));
+  const snap=await getDocs(query(collection(db,'bookings'),where('userId','==',CU.uid)));
   const list=snap.docs.map(d=>({id:d.id,...d.data()})).sort((a,b)=>new Date(b.createdAt)-new Date(a.createdAt));
   if(!list.length){el.innerHTML='<div class="empty-state">예약 내역이 없습니다.</div>';return;}
   el.innerHTML=list.map(bk=>{
@@ -643,18 +706,22 @@ window.showAdminTab=async(tab)=>{
 async function renderAdminContent(){
   const el=document.getElementById('admin-content');
   if(!isAdminUser()){el.innerHTML='<div class="empty-state">관리자만 접근할 수 있습니다.</div>';return;}
-  await ensureFirebaseSession();
   adminReportItems = [];
   el.innerHTML='<div class="loading-overlay"><div class="spinner"></div> 불러오는 중...</div>';
 
   if(adminTab==='members'){
     const snap=await getDocs(collection(db,'users'));
-    const users=snap.docs.map(d=>d.data()).filter(u=>u.type==='member');
+    const users=snap.docs.map(d=>({id:d.id,...d.data()})).filter(u=>u.type!=='deleted').sort((a,b)=>(a.name||'').localeCompare(b.name||'','ko'));
     if(!users.length){el.innerHTML='<div class="empty-state">등록된 회원이 없습니다.</div>';return;}
     el.innerHTML=`<div class="booking-list">${users.map(u=>`
       <div class="booking-card" style="cursor:default">
-        <div style="flex:1"><div class="bk-name">${escapeHtml(u.name)}</div><div class="bk-detail">${escapeHtml(u.phone)} · ${escapeHtml(u.section||'소속 미기입')} · ${escapeHtml(u.role||'직책 미기입')}</div></div>
-        <button class="cancel-btn" onclick="delUser('${escapeHtml(u.phone)}')">삭제</button>
+        <div style="flex:1">
+          <div class="bk-name">${escapeHtml(u.name||u.email)} ${u.type==='admin'?'<span class="status-badge badge-approved">관리자</span>':'<span class="status-badge badge-pending">멤버</span>'}</div>
+          <div class="bk-detail">${escapeHtml(u.email||'-')} · ${escapeHtml(u.phone||'연락처 미기입')} · ${escapeHtml(u.section||'소속 미기입')} · ${escapeHtml(u.role||'직책 미기입')}</div>
+        </div>
+        ${u.type==='member'?`<button class="approve-btn" onclick="promoteUser('${escapeHtml(u.id)}')">관리자 승격</button>`:''}
+        ${u.type==='admin'&&!isPrimaryAdminEmail(u.email)?`<button class="cancel-btn" onclick="demoteUser('${escapeHtml(u.id)}')">멤버로 변경</button>`:''}
+        ${!isPrimaryAdminEmail(u.email)?`<button class="cancel-btn" onclick="delUser('${escapeHtml(u.id)}')">삭제</button>`:''}
       </div>`).join('')}</div>`;
     return;
   }
@@ -678,7 +745,7 @@ async function renderAdminContent(){
     return `<div class="booking-card" style="cursor:default">
       <div style="flex:1">
         <div class="bk-name">${escapeHtml(bk.userName||'이름 없음')} — ${escapeHtml(getRoomName(bk.roomId))}</div>
-        <div class="bk-detail">예약: ${escapeHtml(bk.date)} ${escapeHtml(getSlotLabel(bk.slot))} · 연락처: ${escapeHtml(bk.userPhone||'-')} · 신청: ${formatDateTime(bk.createdAt)}</div>
+        <div class="bk-detail">예약: ${escapeHtml(bk.date)} ${escapeHtml(getSlotLabel(bk.slot))} · 이메일: ${escapeHtml(bk.userEmail||'-')} · 연락처: ${escapeHtml(bk.userPhone||'-')} · 신청: ${formatDateTime(bk.createdAt)}</div>
       </div>
       <span class="status-badge ${badgeClass(bk.status)}">${statusText(bk.status)}</span>
       ${bk.status==='pending'?`<button class="approve-btn" onclick="approveBk('${bk.id}')">승인</button>`:''}
@@ -701,6 +768,7 @@ function buildAdminReportText(items){
   items.forEach((bk,idx)=>{
     lines.push(
       `${idx+1}. ${bk.userName||'이름 없음'} (${bk.userPhone||'-'})`,
+      `   이메일: ${bk.userEmail||'-'}`,
       `   예약: ${bk.date||'-'} ${getSlotLabel(bk.slot)}`,
       `   공간: ${getRoomName(bk.roomId)}`,
       `   상태: ${statusText(bk.status)}`,
@@ -734,19 +802,28 @@ window.sendAdminReport=async()=>{
 };
 
 window.approveBk=async id=>{
-  await ensureFirebaseSession();
-  await updateDoc(doc(db,'bookings',id),{status:'approved',approvedAt:new Date().toISOString(),approvedBy:CU.phone});
+  await updateDoc(doc(db,'bookings',id),{status:'approved',approvedAt:new Date().toISOString(),approvedBy:CU.uid,approvedByEmail:CU.email});
   await renderAdminContent();await renderGrid();toast('예약이 승인되었습니다.','success');
 };
 window.adminCancel=async id=>{
-  await ensureFirebaseSession();
-  await updateDoc(doc(db,'bookings',id),{status:'cancelled',cancelledAt:new Date().toISOString(),cancelledBy:CU.phone});
+  await updateDoc(doc(db,'bookings',id),{status:'cancelled',cancelledAt:new Date().toISOString(),cancelledBy:CU.uid,cancelledByEmail:CU.email});
   await renderAdminContent();await renderGrid();toast('취소 처리되었습니다.','success');
 };
-window.delUser=async phone=>{
+window.promoteUser=async uid=>{
+  if(!confirm('이 멤버를 관리자로 승격하시겠습니까?'))return;
+  await updateDoc(doc(db,'users',uid),{type:'admin',role:'관리자',promotedAt:new Date().toISOString(),promotedBy:CU.uid});
+  await renderAdminContent();
+  toast('관리자로 승격했습니다.','success');
+};
+window.demoteUser=async uid=>{
+  if(!confirm('이 관리자를 멤버로 변경하시겠습니까?'))return;
+  await updateDoc(doc(db,'users',uid),{type:'member',role:'일반회원',demotedAt:new Date().toISOString(),demotedBy:CU.uid});
+  await renderAdminContent();
+  toast('멤버로 변경했습니다.','success');
+};
+window.delUser=async uid=>{
   if(!confirm('정말 삭제하시겠습니까?'))return;
-  await ensureFirebaseSession();
-  await updateDoc(doc(db,'users',phone),{type:'deleted',deletedAt:new Date().toISOString(),deletedBy:CU.phone});
+  await updateDoc(doc(db,'users',uid),{type:'deleted',deletedAt:new Date().toISOString(),deletedBy:CU.uid});
   await renderAdminContent();
   toast('회원이 삭제되었습니다.','success');
 };

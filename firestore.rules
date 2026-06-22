@@ -2,10 +2,33 @@ rules_version = '2';
 
 service cloud.firestore {
   match /databases/{database}/documents {
-    function isActiveUser(phone) {
-      return phone is string
-        && exists(/databases/$(database)/documents/users/$(phone))
-        && get(/databases/$(database)/documents/users/$(phone)).data.type in ['member', 'manager', 'admin'];
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function userDoc(uid) {
+      return /databases/$(database)/documents/users/$(uid);
+    }
+
+    function hasProfile() {
+      return isSignedIn() && exists(userDoc(request.auth.uid));
+    }
+
+    function currentProfile() {
+      return get(userDoc(request.auth.uid));
+    }
+
+    function isAdmin() {
+      return hasProfile() && currentProfile().data.type in ['admin', 'manager'];
+    }
+
+    function isActiveProfile(uid) {
+      return exists(userDoc(uid))
+        && get(userDoc(uid)).data.type in ['member', 'manager', 'admin'];
+    }
+
+    function isPrimaryAdminRequest() {
+      return isSignedIn() && request.auth.token.email == 'leily.yoon@gmail.com';
     }
 
     function validRoom(roomId) {
@@ -24,72 +47,116 @@ service cloud.firestore {
       return status in ['pending', 'approved', 'cancelled'];
     }
 
-    function validUserCreate(userId) {
-      return request.resource.data.keys().hasOnly(['phone', 'pw', 'name', 'section', 'role', 'type', 'createdAt'])
-        && request.resource.data.phone == userId
+    function validUserKeys() {
+      return request.resource.data.keys().hasOnly([
+        'uid', 'email', 'phone', 'name', 'section', 'role', 'type',
+        'createdAt', 'updatedAt',
+        'promotedAt', 'promotedBy', 'demotedAt', 'demotedBy',
+        'deletedAt', 'deletedBy'
+      ]);
+    }
+
+    function validUserBase(userId) {
+      return validUserKeys()
+        && request.resource.data.uid == userId
+        && request.resource.data.email == request.auth.token.email
         && request.resource.data.name is string
-        && request.resource.data.pw is string
-        && request.resource.data.type in ['member', 'manager', 'admin']
+        && request.resource.data.phone is string
+        && request.resource.data.type in ['member', 'manager', 'admin', 'deleted'];
+    }
+
+    function validUserCreate(userId) {
+      return isSignedIn()
+        && request.auth.uid == userId
+        && validUserBase(userId)
         && (
           request.resource.data.type == 'member'
-          || userId in ['administrator', 'manager']
+          || (request.resource.data.type == 'admin' && isPrimaryAdminRequest())
         );
     }
 
-    function validUserSoftDelete(userId) {
-      return resource.data.phone == userId
-        && request.resource.data.phone == userId
-        && request.resource.data.type == 'deleted'
-        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['type', 'deletedAt', 'deletedBy']);
+    function validSelfUserUpdate(userId) {
+      return isSignedIn()
+        && request.auth.uid == userId
+        && validUserBase(userId)
+        && request.resource.data.type == resource.data.type
+        && request.resource.data.uid == resource.data.uid
+        && request.resource.data.email == resource.data.email
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+          'name', 'phone', 'section', 'role', 'updatedAt'
+        ]);
+    }
+
+    function validAdminUserUpdate(userId) {
+      return isAdmin()
+        && validUserKeys()
+        && request.resource.data.uid == resource.data.uid
+        && request.resource.data.email == resource.data.email
+        && request.resource.data.type in ['member', 'manager', 'admin', 'deleted']
+        && (resource.data.email != 'leily.yoon@gmail.com' || request.resource.data.type == 'admin')
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+          'type', 'role',
+          'promotedAt', 'promotedBy', 'demotedAt', 'demotedBy',
+          'deletedAt', 'deletedBy', 'updatedAt'
+        ]);
     }
 
     function validBookingCreate() {
-      return request.resource.data.keys().hasOnly([
-          'date', 'roomId', 'slot', 'userPhone', 'userName',
+      return hasProfile()
+        && request.resource.data.keys().hasOnly([
+          'date', 'roomId', 'slot',
+          'userId', 'userEmail', 'userPhone', 'userName',
           'status', 'isManager', 'createdAt'
         ])
         && request.resource.data.date is string
         && validRoom(request.resource.data.roomId)
         && validSlot(request.resource.data.slot)
-        && isActiveUser(request.resource.data.userPhone)
+        && request.resource.data.userId == request.auth.uid
+        && request.resource.data.userEmail == request.auth.token.email
+        && request.resource.data.userPhone is string
         && request.resource.data.userName is string
+        && isActiveProfile(request.auth.uid)
         && (
           (request.resource.data.status == 'pending' && request.resource.data.isManager == false)
-          || (request.resource.data.status == 'approved' && request.resource.data.isManager == true)
+          || (request.resource.data.status == 'approved' && request.resource.data.isManager == true && isAdmin())
         );
     }
 
-    function validBookingUpdate() {
+    function validBookingUpdateBase() {
       return request.resource.data.keys().hasOnly([
-          'date', 'roomId', 'slot', 'userPhone', 'userName',
+          'date', 'roomId', 'slot',
+          'userId', 'userEmail', 'userPhone', 'userName',
           'status', 'isManager', 'createdAt',
-          'approvedAt', 'approvedBy', 'cancelledAt', 'cancelledBy', 'cancelReason',
+          'approvedAt', 'approvedBy', 'approvedByEmail',
+          'cancelledAt', 'cancelledBy', 'cancelledByEmail', 'cancelReason',
           'price'
         ])
-        && request.resource.data.date == resource.data.date
-        && request.resource.data.roomId == resource.data.roomId
-        && request.resource.data.slot == resource.data.slot
-        && request.resource.data.userPhone == resource.data.userPhone
-        && request.resource.data.userName == resource.data.userName
-        && request.resource.data.isManager == resource.data.isManager
-        && request.resource.data.createdAt == resource.data.createdAt
         && validStatus(request.resource.data.status)
         && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
-          'status', 'approvedAt', 'approvedBy', 'cancelledAt', 'cancelledBy', 'cancelReason'
+          'status', 'approvedAt', 'approvedBy', 'approvedByEmail',
+          'cancelledAt', 'cancelledBy', 'cancelledByEmail', 'cancelReason'
         ]);
     }
 
+    function validOwnerBookingCancel() {
+      return hasProfile()
+        && resource.data.userId == request.auth.uid
+        && request.resource.data.status == 'cancelled'
+        && validBookingUpdateBase();
+    }
+
     match /users/{userId} {
-      allow get, list: if true;
+      allow get: if isSignedIn() && (request.auth.uid == userId || isAdmin());
+      allow list: if isAdmin();
       allow create: if validUserCreate(userId);
-      allow update: if validUserSoftDelete(userId);
+      allow update: if validSelfUserUpdate(userId) || validAdminUserUpdate(userId);
       allow delete: if false;
     }
 
     match /bookings/{bookingId} {
-      allow read: if true;
+      allow read: if hasProfile();
       allow create: if validBookingCreate();
-      allow update: if validBookingUpdate();
+      allow update: if (isAdmin() && validBookingUpdateBase()) || validOwnerBookingCancel();
       allow delete: if false;
     }
 
