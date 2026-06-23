@@ -192,6 +192,7 @@
         <div class="legend-item"><div class="legend-dot" style="background:rgba(139,107,107,0.5)"></div>예약 불가</div>
         <div class="legend-item"><div class="legend-dot" style="background:rgba(184,150,90,0.5)"></div>승인 대기</div>
         <div class="legend-item"><div class="legend-dot" style="background:rgba(122,158,142,0.5)"></div>부녀회 사용</div>
+        <div class="legend-item"><div class="legend-dot" style="background:rgba(139,107,107,0.5)"></div>전체 대관</div>
         <div class="legend-item"><div class="legend-dot" style="background:rgba(107,170,142,0.7);border:2px solid #9EE8C4"></div>내 예약</div>
       </div>
       <div class="grid-wrapper">
@@ -268,16 +269,40 @@
   <div class="modal">
     <h2 id="bk-title"></h2>
     <p class="modal-sub" id="bk-info"></p>
+    <div class="form-group"><label>사용 인원 *</label><input type="number" id="bk-headcount" min="1" placeholder="예) 4" oninput="clearErr('bk-error')"></div>
+    <div class="form-group"><label>사용 목적 *</label><input type="text" id="bk-purpose" placeholder="예) 소그룹 모임, 독서 등" oninput="clearErr('bk-error')"></div>
+    <div id="bk-error" style="color:#e08080;font-size:12px;margin-bottom:12px;display:none"></div>
     <div class="notice-text">
       <strong>예약 신청 안내</strong><br>
       · 예약 신청 후 관리자가 확인하면 예약 완료로 변경됩니다.<br>
       · 승인 전에도 해당 시간대는 <strong>예약 불가</strong> 상태로 표시됩니다.<br>
-      · 예약자 이름, 연락처, 예약 시간이 관리자 화면과 메일 보고서에 포함됩니다.<br>
+      · 예약자 이름, 연락처, 예약 시간, 사용 인원·목적이 관리자 화면과 메일 보고서에 포함됩니다.<br>
       · <strong>정원을 반드시 준수</strong>해 주시기 바랍니다.
     </div>
     <div class="modal-btns" style="margin-top:20px;">
       <button class="btn btn-secondary" onclick="closeModal('booking-modal')">취소</button>
       <button class="btn btn-primary" id="bk-confirm-btn" onclick="confirmBooking()">예약 신청</button>
+    </div>
+  </div>
+</div>
+
+<!-- FULL VENUE -->
+<div class="modal-overlay" id="fullvenue-modal">
+  <div class="modal">
+    <h2>전체 대관 신청</h2>
+    <p class="modal-sub" id="fv-info"></p>
+    <div class="form-group"><label>사용 인원 *</label><input type="number" id="fv-headcount" min="1" placeholder="예) 30" oninput="clearErr('fv-error')"></div>
+    <div class="form-group"><label>사용 목적 *</label><input type="text" id="fv-purpose" placeholder="예) 전체 모임, 행사 등" oninput="clearErr('fv-error')"></div>
+    <div id="fv-error" style="color:#e08080;font-size:12px;margin-bottom:12px;display:none"></div>
+    <div class="notice-text">
+      <strong>전체 대관 안내</strong><br>
+      · 전체 대관은 해당 시간대에 <strong>예약된 테이블이 하나도 없을 때만</strong> 신청할 수 있습니다.<br>
+      · 관리자가 승인하면 해당 시간대의 <strong>모든 테이블 예약이 비활성화</strong>됩니다.<br>
+      · 신청인, 연락처, 날짜·시간, 사용 인원·목적이 관리자 화면에 표시됩니다.
+    </div>
+    <div class="modal-btns" style="margin-top:20px;">
+      <button class="btn btn-secondary" onclick="closeModal('fullvenue-modal')">취소</button>
+      <button class="btn btn-primary" id="fv-confirm-btn" onclick="confirmFullVenue()">대관 신청</button>
     </div>
   </div>
 </div>
@@ -347,6 +372,7 @@ const ADMIN_REPORT_SUBJECT_PREFIX = 'Heyan 예약 보고서';
 let CU = null; // currentUser
 let authUser = null;
 let pendingBk = null;
+let pendingFv = null;
 let detailId = null;
 let adminTab = 'today';
 let adminReportItems = [];
@@ -457,7 +483,7 @@ async function handleAuthChange(user){
     toast('회원 정보를 불러오지 못했습니다.','error');
   }
 }
-function getRoomName(roomId){return ROOMS.find(r=>r.id===roomId)?.name||roomId||'-';}
+function getRoomName(roomId){if(roomId==='all')return '전체 대관';return ROOMS.find(r=>r.id===roomId)?.name||roomId||'-';}
 function getSlotLabel(slotKey){return SLOTS.find(s=>s.key===slotKey)?.label||slotKey||'-';}
 function statusText(status){return {pending:'승인 대기',approved:'예약 완료',cancelled:'취소됨'}[status]||status||'-';}
 function badgeClass(status){return {pending:'badge-pending',approved:'badge-approved',cancelled:'badge-cancelled'}[status]||'';}
@@ -552,13 +578,48 @@ window.renderGrid = async()=>{
   tbody.innerHTML='<tr><td colspan="6"><div class="loading-overlay"><div class="spinner"></div> 불러오는 중...</div></td></tr>';
 
   const bkMap={};
+  const fullVenueBySlot={};   // slot -> 전체대관 예약 (pending/approved)
+  const slotHasTable={};      // slot -> 테이블 예약 존재 여부
   if(CU){
     const q=query(collection(db,'bookings'),where('date','==',date),where('status','in',['pending','approved']));
     const snap=await getDocs(q);
-    snap.forEach(d=>{const b=d.data();bkMap[b.roomId+'_'+b.slot]={...b,id:d.id};});
+    snap.forEach(d=>{
+      const b={...d.data(),id:d.id};
+      if(b.roomId==='all'){fullVenueBySlot[b.slot]=b;}
+      else{bkMap[b.roomId+'_'+b.slot]=b;slotHasTable[b.slot]=true;}
+    });
   }
 
   tbody.innerHTML='';
+
+  // ── 전체 대관 행 ──
+  const fvHeader=document.createElement('tr');
+  fvHeader.className='room-section-header';
+  fvHeader.innerHTML='<td colspan="6">전체 대관</td>';
+  tbody.appendChild(fvHeader);
+  const fvRow=document.createElement('tr');
+  let fvHtml=`<td><span class="room-name">전체 대관</span><span class="room-info">전 공간 단독 사용</span></td>`;
+  SLOTS.forEach(slot=>{
+    const fv=fullVenueBySlot[slot.key];
+    let cc,ct,clickable=false;
+    if(fv){
+      if(fv.status==='approved'){
+        if(isCurrentBookingOwner(fv)){cc='my-booking';ct='내 대관 ✓';clickable=true;}
+        else{cc='unavailable';ct='전체대관';}
+      }else{ // pending
+        if(isCurrentBookingOwner(fv)){cc='my-booking';ct='대관 신청중';clickable=true;}
+        else{cc='pending';ct='전체대관 대기';}
+      }
+    }else if(slotHasTable[slot.key]){
+      cc='unavailable';ct='대관 불가';
+    }else{
+      cc='available';ct=CU?'전체대관 신청':'로그인 후 확인';clickable=!!CU;
+    }
+    fvHtml+=`<td><button class="cell ${cc}" ${clickable?`data-fv="1" data-slot="${slot.key}" data-date="${date}"`:''} ${!clickable?'disabled':''}>${ct}</button></td>`;
+  });
+  fvRow.innerHTML=fvHtml;
+  tbody.appendChild(fvRow);
+
   let lastSec='';
   ROOMS.forEach(room=>{
     if(room.section!==lastSec){
@@ -573,6 +634,12 @@ window.renderGrid = async()=>{
     SLOTS.forEach(slot=>{
       const bk=bkMap[room.id+'_'+slot.key];
       let cc='available',ct=CU?'예약 가능':'로그인 후 확인';
+      const fv=fullVenueBySlot[slot.key];
+      if(fv){
+        cc='unavailable';ct=fv.status==='approved'?'전체대관':'전체대관 대기';
+        html+=`<td><button class="cell ${cc}" disabled>${ct}</button></td>`;
+        return;
+      }
       if(bk){
         if(bk.status==='approved'){
           if(bk.isManager){cc='bojanghoe';ct='부녀회 사용';}
@@ -592,6 +659,9 @@ window.renderGrid = async()=>{
 
   tbody.querySelectorAll('.cell[data-room]').forEach(btn=>{
     btn.addEventListener('click',()=>handleCell(btn.dataset.room,btn.dataset.slot,btn.dataset.date));
+  });
+  tbody.querySelectorAll('.cell[data-fv]').forEach(btn=>{
+    btn.addEventListener('click',()=>handleFullVenueCell(btn.dataset.slot,btn.dataset.date));
   });
 };
 
@@ -624,19 +694,46 @@ async function handleCell(roomId,slot,date){
 
   pendingBk={roomId,slot,date};
   document.getElementById('bk-title').textContent=room.name+' 예약 신청';
-  document.getElementById('bk-info').textContent=`${date} · ${slotObj.label}`;
+  document.getElementById('bk-info').textContent=`${date} · ${slotObj.label} · 최대 ${room.capacity}인`;
+  document.getElementById('bk-headcount').value='';
+  document.getElementById('bk-purpose').value='';
+  clearErr('bk-error');
   openModal('booking-modal');
+}
+
+// ── 전체 대관 클릭 ──
+async function handleFullVenueCell(slot,date){
+  if(!CU){openModal('login-modal');return;}
+  // 내 전체대관 신청 확인 → 상세 열기
+  const q=query(collection(db,'bookings'),where('date','==',date),where('roomId','==','all'),where('slot','==',slot));
+  const snap=await getDocs(q);
+  const mine=snap.docs.find(d=>['pending','approved'].includes(d.data().status)&&isCurrentBookingOwner(d.data()));
+  if(mine){openDetailModal({id:mine.id,...mine.data()});return;}
+  const slotObj=SLOTS.find(s=>s.key===slot);
+  pendingFv={slot,date};
+  document.getElementById('fv-info').textContent=`${date} · ${slotObj.label} · 전 공간 단독 사용`;
+  document.getElementById('fv-headcount').value='';
+  document.getElementById('fv-purpose').value='';
+  clearErr('fv-error');
+  openModal('fullvenue-modal');
 }
 
 // ── CONFIRM BOOKING ──
 window.confirmBooking=async()=>{
   if(!pendingBk||!CU)return;
+  const room=ROOMS.find(r=>r.id===pendingBk.roomId);
+  const headcount=parseInt(document.getElementById('bk-headcount').value,10);
+  const purpose=document.getElementById('bk-purpose').value.trim();
+  if(!headcount||headcount<1){showErr('bk-error','사용 인원을 입력해 주세요.');return;}
+  if(room&&headcount>room.capacity){showErr('bk-error',`이 공간의 정원은 최대 ${room.capacity}인입니다.`);return;}
+  if(!purpose){showErr('bk-error','사용 목적을 입력해 주세요.');return;}
   const btn=document.getElementById('bk-confirm-btn');
   btn.textContent='신청 중...';btn.disabled=true;
   try{
     await setDoc(doc(db,'bookings','bk_'+Date.now()),{
       date:pendingBk.date,roomId:pendingBk.roomId,slot:pendingBk.slot,
       userId:CU.uid,userEmail:CU.email,userPhone:CU.phone,userName:CU.name,status:'pending',isManager:false,
+      headcount,purpose,
       createdAt:new Date().toISOString()
     });
     closeModal('booking-modal');pendingBk=null;
@@ -646,19 +743,50 @@ window.confirmBooking=async()=>{
   finally{btn.textContent='예약 신청';btn.disabled=false;}
 };
 
+// ── CONFIRM FULL VENUE ──
+window.confirmFullVenue=async()=>{
+  if(!pendingFv||!CU)return;
+  const headcount=parseInt(document.getElementById('fv-headcount').value,10);
+  const purpose=document.getElementById('fv-purpose').value.trim();
+  if(!headcount||headcount<1){showErr('fv-error','사용 인원을 입력해 주세요.');return;}
+  if(!purpose){showErr('fv-error','사용 목적을 입력해 주세요.');return;}
+  const btn=document.getElementById('fv-confirm-btn');
+  btn.textContent='신청 중...';btn.disabled=true;
+  try{
+    // 신청 직전 재확인: 해당 시간대에 예약된 테이블/전체대관이 없어야 함
+    const snap=await getDocs(query(collection(db,'bookings'),where('date','==',pendingFv.date),where('slot','==',pendingFv.slot),where('status','in',['pending','approved'])));
+    if(!snap.empty){
+      showErr('fv-error','해당 시간대에 이미 예약이 있어 전체 대관을 신청할 수 없습니다.');
+      btn.textContent='대관 신청';btn.disabled=false;
+      await renderGrid();
+      return;
+    }
+    await setDoc(doc(db,'bookings','fv_'+Date.now()),{
+      date:pendingFv.date,roomId:'all',slot:pendingFv.slot,
+      userId:CU.uid,userEmail:CU.email,userPhone:CU.phone,userName:CU.name,status:'pending',isManager:false,
+      headcount,purpose,
+      createdAt:new Date().toISOString()
+    });
+    closeModal('fullvenue-modal');pendingFv=null;
+    await renderGrid();
+    toast('전체 대관 신청이 완료되었습니다. 관리자 승인 후 확정됩니다.','success');
+  }catch(e){toast('오류가 발생했습니다.','error');btn.textContent='대관 신청';btn.disabled=false;}
+};
+
 // ── DETAIL ──
 function openDetailModal(bk){
   detailId=bk.id;
-  const room=ROOMS.find(r=>r.id===bk.roomId);
   const slotObj=SLOTS.find(s=>s.key===bk.slot);
   document.getElementById('detail-content').innerHTML=`
     <div style="display:grid;gap:10px;">
-      <div><span style="color:var(--text-dim);display:inline-block;min-width:70px;">공간</span><strong>${escapeHtml(room?.name||bk.roomId)}</strong></div>
+      <div><span style="color:var(--text-dim);display:inline-block;min-width:70px;">공간</span><strong>${escapeHtml(getRoomName(bk.roomId))}</strong></div>
       <div><span style="color:var(--text-dim);display:inline-block;min-width:70px;">날짜</span>${bk.date}</div>
       <div><span style="color:var(--text-dim);display:inline-block;min-width:70px;">시간</span>${slotObj?.label||bk.slot}</div>
       <div><span style="color:var(--text-dim);display:inline-block;min-width:70px;">예약자</span>${escapeHtml(bk.userName||'-')}</div>
-      <div><span style="color:var(--text-dim);display:inline-block;min-width:70px;">이메일</span>${escapeHtml(bk.userEmail||'-')}</div>
       <div><span style="color:var(--text-dim);display:inline-block;min-width:70px;">연락처</span>${escapeHtml(bk.userPhone||'-')}</div>
+      <div><span style="color:var(--text-dim);display:inline-block;min-width:70px;">사용 인원</span>${bk.headcount?escapeHtml(bk.headcount+'명'):'-'}</div>
+      <div><span style="color:var(--text-dim);display:inline-block;min-width:70px;">사용 목적</span>${escapeHtml(bk.purpose||'-')}</div>
+      <div><span style="color:var(--text-dim);display:inline-block;min-width:70px;">이메일</span>${escapeHtml(bk.userEmail||'-')}</div>
       <div><span style="color:var(--text-dim);display:inline-block;min-width:70px;">신청시각</span>${formatDateTime(bk.createdAt)}</div>
       <div><span style="color:var(--text-dim);display:inline-block;min-width:70px;">상태</span><span class="status-badge ${badgeClass(bk.status)}">${statusText(bk.status)}</span></div>
       ${bk.status==='pending'?`<div class="notice-text" style="margin-top:4px;">관리자 승인 전까지는 승인 대기 상태로 표시됩니다.</div>`:''}
@@ -693,11 +821,10 @@ async function renderMyBookings(){
   const list=snap.docs.map(d=>({id:d.id,...d.data()})).sort((a,b)=>new Date(b.createdAt)-new Date(a.createdAt));
   if(!list.length){el.innerHTML='<div class="empty-state">예약 내역이 없습니다.</div>';return;}
   el.innerHTML=list.map(bk=>{
-    const room=ROOMS.find(r=>r.id===bk.roomId);
     const slot=SLOTS.find(s=>s.key===bk.slot);
     return `<div class="booking-card" style="cursor:pointer" onclick='_openDetail(${JSON.stringify(bk).replace(/'/g,"&#39;")})'>
       <div class="bk-info">
-        <div class="bk-name">${escapeHtml(room?.name||bk.roomId)} · ${escapeHtml(bk.date)} ${escapeHtml(slot?.label||bk.slot)}</div>
+        <div class="bk-name">${escapeHtml(getRoomName(bk.roomId))} · ${escapeHtml(bk.date)} ${escapeHtml(slot?.label||bk.slot)}</div>
         <div class="bk-detail">신청시각: ${formatDateTime(bk.createdAt)}</div>
       </div>
       <span class="status-badge ${badgeClass(bk.status)}">${statusText(bk.status)}</span>
@@ -755,7 +882,8 @@ async function renderAdminContent(){
     return `<div class="booking-card" style="cursor:default">
       <div style="flex:1">
         <div class="bk-name">${escapeHtml(bk.userName||'이름 없음')} — ${escapeHtml(getRoomName(bk.roomId))}</div>
-        <div class="bk-detail">예약: ${escapeHtml(bk.date)} ${escapeHtml(getSlotLabel(bk.slot))} · 이메일: ${escapeHtml(bk.userEmail||'-')} · 연락처: ${escapeHtml(bk.userPhone||'-')} · 신청: ${formatDateTime(bk.createdAt)}</div>
+        <div class="bk-detail">날짜: ${escapeHtml(bk.date)} · 이용시간: ${escapeHtml(getSlotLabel(bk.slot))} · 연락처: ${escapeHtml(bk.userPhone||'-')} · 사용인원: ${bk.headcount?escapeHtml(bk.headcount+'명'):'-'} · 사용목적: ${escapeHtml(bk.purpose||'-')}</div>
+        <div class="bk-detail">이메일: ${escapeHtml(bk.userEmail||'-')} · 신청: ${formatDateTime(bk.createdAt)}</div>
       </div>
       <span class="status-badge ${badgeClass(bk.status)}">${statusText(bk.status)}</span>
       ${bk.status==='pending'?`<button class="approve-btn" onclick="approveBk('${bk.id}')">승인</button>`:''}
@@ -778,9 +906,10 @@ function buildAdminReportText(items){
   items.forEach((bk,idx)=>{
     lines.push(
       `${idx+1}. ${bk.userName||'이름 없음'} (${bk.userPhone||'-'})`,
-      `   이메일: ${bk.userEmail||'-'}`,
-      `   예약: ${bk.date||'-'} ${getSlotLabel(bk.slot)}`,
+      `   날짜: ${bk.date||'-'}  이용시간: ${getSlotLabel(bk.slot)}`,
       `   공간: ${getRoomName(bk.roomId)}`,
+      `   사용인원: ${bk.headcount?bk.headcount+'명':'-'}  사용목적: ${bk.purpose||'-'}`,
+      `   이메일: ${bk.userEmail||'-'}`,
       `   상태: ${statusText(bk.status)}`,
       `   신청시각: ${formatDateTime(bk.createdAt)}`,
       ''

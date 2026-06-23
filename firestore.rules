@@ -35,7 +35,8 @@ service cloud.firestore {
       return roomId in [
         '4seat_1', '4seat_2', '4seat_3', '4seat_4', '4seat_5', '4seat_6', '4seat_7',
         '6seat_1', '6seat_2', '6seat_3',
-        'meeting', 'room'
+        'meeting', 'room',
+        'all'
       ];
     }
 
@@ -106,7 +107,8 @@ service cloud.firestore {
         && request.resource.data.keys().hasOnly([
           'date', 'roomId', 'slot',
           'userId', 'userEmail', 'userPhone', 'userName',
-          'status', 'isManager', 'createdAt'
+          'status', 'isManager', 'createdAt',
+          'headcount', 'purpose'
         ])
         && request.resource.data.date is string
         && validRoom(request.resource.data.roomId)
@@ -115,6 +117,8 @@ service cloud.firestore {
         && request.resource.data.userEmail == request.auth.token.email
         && request.resource.data.userPhone is string
         && request.resource.data.userName is string
+        && (!('headcount' in request.resource.data) || request.resource.data.headcount is int)
+        && (!('purpose' in request.resource.data) || request.resource.data.purpose is string)
         && isActiveProfile(request.auth.uid)
         && (
           (request.resource.data.status == 'pending' && request.resource.data.isManager == false)
@@ -127,6 +131,7 @@ service cloud.firestore {
           'date', 'roomId', 'slot',
           'userId', 'userEmail', 'userPhone', 'userName',
           'status', 'isManager', 'createdAt',
+          'headcount', 'purpose',
           'approvedAt', 'approvedBy', 'approvedByEmail',
           'cancelledAt', 'cancelledBy', 'cancelledByEmail', 'cancelReason',
           'price'
